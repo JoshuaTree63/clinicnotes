@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-navy: #1B263B;
+  --color-brand-cream: #F5EFEB;
+  --color-brand-sage: #819889;
+  --color-brand-accent: #C7BCA1;
+  
+  --font-family-serif: "Playfair Display", serif;
+  --font-family-sans: "IBM Plex Sans", sans-serif;
+}
+
+body {
+  background-color: var(--color-brand-navy);
+  color: var(--color-brand-cream);
+  font-family: var(--font-family-sans);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-family-serif);
+}
+
+/* Custom scrollbar for transcript view */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-brand-sage);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-brand-accent);
+}
