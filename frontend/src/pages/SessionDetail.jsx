@@ -1,16 +1,39 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSession, analyzeSession } from '../api/client'
+import { getSession, analyzeSession, overrideTranscript } from '../api/client'
 import TranscriptView from '../components/TranscriptView'
 import AnalysisCard from '../components/AnalysisCard'
-import { Loader2, ArrowRight, Calendar, ArrowLeft } from 'lucide-react'
+import { Loader2, ArrowRight, Calendar, ArrowLeft, Upload } from 'lucide-react'
 
 export default function SessionDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [analyzeError, setAnalyzeError] = useState('')
+  const [isUploadingDoc, setIsUploadingDoc] = useState(false)
+  const fileInputRef = useRef(null)
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setIsUploadingDoc(true)
+    setAnalyzeError('')
+    
+    try {
+      await overrideTranscript(id, file)
+      queryClient.invalidateQueries({ queryKey: ['session', id] })
+      queryClient.invalidateQueries({ queryKey: ['sessions'] })
+    } catch (err) {
+      setAnalyzeError(err.response?.data?.detail || err.message || 'Failed to upload document')
+    } finally {
+      setIsUploadingDoc(false)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
 
   const { data: session, isLoading, error } = useQuery({
     queryKey: ['session', id],
@@ -24,8 +47,8 @@ export default function SessionDetail() {
   const analyzeMutation = useMutation({
     mutationFn: () => analyzeSession(id),
     onSuccess: () => {
-      queryClient.invalidateQueries(['session', id])
-      queryClient.invalidateQueries(['sessions'])
+      queryClient.invalidateQueries({ queryKey: ['session', id] })
+      queryClient.invalidateQueries({ queryKey: ['sessions'] })
     },
     onError: (err) => {
       setAnalyzeError(err.response?.data?.detail || err.message || 'Analysis failed')
@@ -61,15 +84,35 @@ export default function SessionDetail() {
         <ArrowLeft size={16} /> Back
       </button>
 
-      <header className="border-b border-brand-sage/20 pb-6">
-        <h1 className="text-3xl font-serif text-brand-cream mb-3">
-          Session Record
-        </h1>
-        <div className="flex items-center gap-4 text-brand-sage/80">
-          <span className="flex items-center gap-1.5"><Calendar size={16} /> {dateStr}</span>
-          <span className="bg-black/20 px-3 py-1 rounded text-xs border border-[#2C3E50]">
-            {session.filename}
-          </span>
+      <header className="border-b border-brand-sage/20 pb-6 flex flex-col md:flex-row md:items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-serif text-brand-cream mb-3">
+            Session Record
+          </h1>
+          <div className="flex items-center gap-4 text-brand-sage/80">
+            <span className="flex items-center gap-1.5"><Calendar size={16} /> {dateStr}</span>
+            <span className="bg-black/20 px-3 py-1 rounded text-xs border border-[#2C3E50]">
+              {session.filename}
+            </span>
+          </div>
+        </div>
+
+        <div>
+          <input 
+            type="file" 
+            accept=".docx" 
+            className="hidden" 
+            ref={fileInputRef} 
+            onChange={handleFileUpload} 
+          />
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isUploadingDoc}
+            className="flex items-center gap-2 bg-brand-sage/10 text-brand-sage px-4 py-2 rounded text-sm hover:bg-brand-sage/20 transition-colors disabled:opacity-50"
+          >
+            {isUploadingDoc ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+            Override with Word Doc
+          </button>
         </div>
       </header>
 

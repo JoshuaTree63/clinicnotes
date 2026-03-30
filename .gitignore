@@ -11,6 +11,7 @@ Icon
 .env
 .env.local
 .env.*.local
+.claude/settings.json
 
 # Python
 __pycache__/

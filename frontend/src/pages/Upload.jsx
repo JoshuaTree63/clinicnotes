@@ -38,6 +38,12 @@ export default function Upload() {
           }
         } catch (err) {
           console.error(err)
+          // If the backend restarted, we might get a 404 for a missing job ID.
+          // Handle this explicitly by abandoning the polling so we don't spin forever.
+          setError('Lost connection to the backend or the transcription job was interrupted. Please refresh and try again.')
+          setIsTranscribing(false)
+          setJobId(null)
+          clearInterval(interval)
         }
       }, 2000)
     }
@@ -53,7 +59,18 @@ export default function Upload() {
 
     try {
       const response = await transcribeAudio(selectedFile)
-      setJobId(response.data.job_id)
+      
+      // If the backend returned a job_id, we start polling
+      if (response.data.job_id) {
+        setJobId(response.data.job_id)
+      } 
+      // If the backend returned the final result synchronously
+      else if (response.data.session_id || response.data.id) {
+        setSessionData(response.data)
+        setIsTranscribing(false)
+      } else {
+        throw new Error("Invalid response from server: Missing job_id or session_id")
+      }
     } catch (err) {
       console.error(err)
       setError(err.response?.data?.detail || err.message || 'Failed to start transcription')
@@ -63,13 +80,15 @@ export default function Upload() {
   }
 
   const handleAnalyze = async () => {
-    if (!sessionData?.session_id) return
+    // Look for session_id in multiple possible keys returned by the backend
+    const sessionId = sessionData?.session_id || sessionData?.id
+    if (!sessionId) return
 
     setIsAnalyzing(true)
     setError('')
     try {
-      await analyzeSession(sessionData.session_id)
-      navigate(`/sessions/${sessionData.session_id}`)
+      await analyzeSession(sessionId)
+      navigate(`/sessions/${sessionId}`)
     } catch (err) {
       console.error(err)
       setError(err.response?.data?.detail || err.message || 'Analysis failed')
@@ -104,20 +123,18 @@ export default function Upload() {
           <Loader2 className="animate-spin text-brand-accent mb-6" size={40} />
           <h3 className="text-2xl font-serif text-brand-cream mb-2">Transcribing audio...</h3>
           <p className="text-brand-sage/70 text-sm mb-8">
-            We are splitting the audio into chunks and transcribing them with Groq.
+            Processing your audio file with Groq's Whisper API.
           </p>
           
           {/* Progress Bar Container */}
           <div className="w-full max-w-md bg-black/40 rounded-full h-3 mb-3 overflow-hidden border border-brand-sage/20">
             <div 
-              className="bg-brand-accent h-3 rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${progress.total > 0 ? (progress.completed / progress.total) * 100 : 5}%` }}
+              className="bg-brand-accent h-3 rounded-full transition-all duration-500 ease-out animate-pulse"
+              style={{ width: `100%` }}
             ></div>
           </div>
           <p className="text-brand-sage/60 font-mono text-sm">
-            {progress.total > 0 
-              ? `Completed ${progress.completed} of ${progress.total} chunks` 
-              : 'Initializing engine...'}
+            Analyzing audio...
           </p>
         </div>
       )}
@@ -128,7 +145,26 @@ export default function Upload() {
             <span>Successfully transcribed <strong>{file?.name}</strong></span>
           </div>
           
-          <TranscriptView transcript={sessionData.transcript} />
+          {/* Conversation Window */}
+          <div className="bg-[#0A0F1D] border border-[#2C3E50] rounded-xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-3 border-b border-[#2C3E50] bg-white/5 flex items-center justify-between">
+              <h3 className="text-xs font-bold text-brand-sage uppercase tracking-widest">Session Transcript</h3>
+              <div className="flex gap-1.5">
+                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
+                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
+                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
+              </div>
+            </div>
+            <div className="max-h-[600px] overflow-y-auto p-6 bg-black/20">
+              <TranscriptView 
+                transcript={
+                  sessionData?.transcript || 
+                  sessionData?.text || 
+                  (typeof sessionData === 'string' ? sessionData : '')
+                } 
+              />
+            </div>
+          </div>
 
           <div className="flex justify-end pt-4">
             <button

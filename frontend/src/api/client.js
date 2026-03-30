@@ -23,3 +23,11 @@ export const getSessions = () => api.get("/sessions");
 export const getSession = (id) => api.get(`/sessions/${id}`);
 export const indexPdfs = () => api.post("/index");
 export const getIndexStatus = () => api.get("/index/status");
+
+export const overrideTranscript = (sessionId, file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post(`/sessions/${sessionId}/transcript/override`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+}

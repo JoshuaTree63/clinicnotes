@@ -1,8 +1,15 @@
 import os
 import torch
+import numpy as np
+
+# Backward-compatible alias for old numpy usage
+if not hasattr(np, 'NAN'):
+    np.NAN = np.nan
+
 from pyannote.audio import Pipeline
 from huggingface_hub import login, hf_hub_download
 import huggingface_hub
+import huggingface_hub.file_download
 
 # --- HuggingFace Compatibility Monkeypatch ---
 # pyannote-audio uses 'use_auth_token' which is deprecated in newer hf_hub
@@ -15,6 +22,7 @@ def _patched_hf_hub_download(*args, **kwargs):
     return _original_hf_hub_download(*args, **kwargs)
 
 huggingface_hub.hf_hub_download = _patched_hf_hub_download
+huggingface_hub.file_download.hf_hub_download = _patched_hf_hub_download
 # ---------------------------------------------
 
 def run_diarization(file_path: str):

@@ -22,7 +22,7 @@ source venv/bin/activate       # Mac/Linux
 ```bash
 pip install fastapi uvicorn python-multipart groq openai \
   langchain langchain-community langchain-huggingface \
-  chromadb pymupdf sentence-transformers \
+  chromadb pymupdf sentence-transformers python-docx langchain-text-splitters \
   python-dotenv httpx pydantic
 ```
 

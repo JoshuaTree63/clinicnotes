@@ -1,7 +1,7 @@
 import json
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, concurrency
 from pydantic import BaseModel
 from services.rag_service import (
     analyze_with_groq,
@@ -31,15 +31,15 @@ async def analyze_session(request: AnalyzeRequest):
         raise HTTPException(400, detail="Session has no transcript to analyze")
 
     # Retrieve relevant PDF chunks
-    context_chunks = retrieve_context(transcript)
+    context_chunks = await concurrency.run_in_threadpool(retrieve_context, transcript)
     if not context_chunks:
         raise HTTPException(
             400, detail="No indexed documents found. Run /api/index first."
         )
 
-    # Try Groq first, fall back to OpenRouter
+    # Try Groq first, fall back to OpenRouter (running in threads)
     try:
-        analysis = analyze_with_groq(transcript, context_chunks)
+        analysis = await concurrency.run_in_threadpool(analyze_with_groq, transcript, context_chunks)
     except Exception:
         try:
             analysis = await analyze_with_openrouter(transcript, context_chunks)
@@ -84,3 +84,40 @@ def get_session(session_id: str):
         raise HTTPException(404, detail="Session not found")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+from fastapi import UploadFile, File
+import docx
+
+@router.post("/sessions/{session_id}/transcript/override")
+def override_transcript(session_id: str, file: UploadFile = File(...)):
+    if not file.filename.endswith(".docx"):
+        raise HTTPException(400, detail="Only .docx files are supported")
+    
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+        
+    try:
+        # Read the docx file
+        doc = docx.Document(file.file)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+            
+        new_transcript = "\n".join(full_text)
+        
+        # Load and update session JSON
+        with open(path, "r", encoding="utf-8") as f:
+            session = json.load(f)
+            
+        session["transcript"] = new_transcript
+        
+        # Write back
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(session, f, ensure_ascii=False, indent=2)
+            
+        return {"status": "success", "session_id": session_id}
+        
+    except Exception as e:
+        raise HTTPException(500, detail=f"Failed to process Word document: {str(e)}")
