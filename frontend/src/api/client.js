@@ -12,6 +12,14 @@ export const transcribeAudio = (file) => {
   })
 }
 
+export const uploadTranscript = (file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post('/upload-transcript', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+}
+
 export const checkTranscribeStatus = (jobId) => {
   return api.get(`/transcribe/status/${jobId}`)
 };

@@ -1,6 +1,6 @@
 import React from 'react'
 import ThemeTag from './ThemeTag'
-import { BookOpen, AlertCircle, Quote, BrainCircuit } from 'lucide-react'
+import { BookOpen, AlertCircle, Quote, BrainCircuit, User } from 'lucide-react'
 
 export default function AnalysisCard({ analysis }) {
   if (!analysis) return null
@@ -43,6 +43,29 @@ export default function AnalysisCard({ analysis }) {
         </div>
       </div>
 
+      {/* Speaker Profiles */}
+      {analysis.speaker_profiles && Object.keys(analysis.speaker_profiles).length > 0 && (
+        <div className="bg-[#121A2F] border border-brand-sage/30 rounded-xl p-6">
+          <div className="flex items-center gap-2 mb-6 text-brand-sage">
+            <User size={20} />
+            <h3 className="text-xl font-serif">Speaker Profiles</h3>
+          </div>
+          
+          <div className="grid md:grid-cols-2 gap-4">
+            {Object.entries(analysis.speaker_profiles).map(([speaker, profile], i) => (
+              <div key={i} className="bg-black/20 rounded-lg p-4 border border-brand-sage/10">
+                <div className="text-xs font-semibold uppercase tracking-wider text-brand-accent mb-2">
+                  {speaker}
+                </div>
+                <p className="text-sm text-brand-cream/80 leading-relaxed">
+                  {profile}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Notable Moments */}
       <div className="bg-black/20 border border-[#2C3E50] rounded-xl p-6">
         <div className="flex items-center gap-2 mb-6 text-brand-sage">
@@ -53,6 +76,14 @@ export default function AnalysisCard({ analysis }) {
         <div className="space-y-4">
           {analysis.notable_moments?.map((moment, i) => (
             <div key={i} className="bg-black/20 rounded-lg p-4 border border-brand-sage/10">
+              {/* Speaker attribution badge */}
+              {moment.speaker && (
+                <div className="mb-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-brand-accent/70 bg-brand-accent/10 px-2 py-0.5 rounded">
+                    {moment.speaker}
+                  </span>
+                </div>
+              )}
               <div className="flex gap-3 mb-3">
                 <Quote size={16} className="text-brand-accent/50 shrink-0 mt-1" />
                 <p className="italic text-brand-cream/80 text-sm">

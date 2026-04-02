@@ -1,8 +1,10 @@
+import io
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, concurrency
+from fastapi import APIRouter, HTTPException, UploadFile, File, concurrency
 from pydantic import BaseModel
+from services.groq_service import diarize_transcript, format_transcript_for_llm
 from services.rag_service import (
     analyze_with_groq,
     analyze_with_openrouter,
@@ -26,7 +28,14 @@ async def analyze_session(request: AnalyzeRequest):
     with open(session_path, "r", encoding="utf-8") as f:
         session = json.load(f)
 
-    transcript = session.get("transcript", "")
+    # Build transcript text for analysis — prefer diarized format, fall back to legacy
+    diarized_turns = session.get("transcript_diarized")
+    if diarized_turns:
+        transcript = format_transcript_for_llm(diarized_turns)
+    else:
+        # Backwards compat: old sessions with plain "transcript" field
+        transcript = session.get("transcript", "")
+
     if not transcript:
         raise HTTPException(400, detail="Session has no transcript to analyze")
 
@@ -71,6 +80,8 @@ def list_sessions():
                         "id": s["id"],
                         "date": s["date"],
                         "filename": s.get("filename"),
+                        "source": s.get("source", "audio"),
+                        "speaker_count": s.get("speaker_count"),
                         "has_analysis": s.get("analysis") is not None,
                     }
                 )
@@ -86,38 +97,68 @@ def get_session(session_id: str):
         return json.load(f)
 
 
-from fastapi import UploadFile, File
 import docx
 
+
 @router.post("/sessions/{session_id}/transcript/override")
-def override_transcript(session_id: str, file: UploadFile = File(...)):
-    if not file.filename.endswith(".docx"):
-        raise HTTPException(400, detail="Only .docx files are supported")
-    
+async def override_transcript(session_id: str, file: UploadFile = File(...)):
+    """
+    Override a session's transcript with an uploaded .docx or .pdf file.
+    Re-runs diarization on the new content.
+    """
+    filename = file.filename.lower()
+
     path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, detail="Session not found")
-        
+
     try:
-        # Read the docx file
-        doc = docx.Document(file.file)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-            
-        new_transcript = "\n".join(full_text)
-        
+        # Extract text from the uploaded file
+        if filename.endswith(".docx"):
+            source_type = "manual_docx"
+            contents = file.file.read()
+            doc = docx.Document(io.BytesIO(contents))
+            new_text = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+        elif filename.endswith(".pdf"):
+            import fitz
+            source_type = "manual_pdf"
+            contents = file.file.read()
+            pdf_doc = fitz.open(stream=contents, filetype="pdf")
+            new_text = "\n".join(page.get_text() for page in pdf_doc)
+        else:
+            raise HTTPException(400, detail="Only .docx and .pdf files are supported")
+
+        if not new_text.strip():
+            raise HTTPException(400, detail="Could not extract text from the uploaded file")
+
+        # Re-diarize the new transcript
+        diarization = await concurrency.run_in_threadpool(diarize_transcript, new_text)
+
         # Load and update session JSON
         with open(path, "r", encoding="utf-8") as f:
             session = json.load(f)
-            
-        session["transcript"] = new_transcript
-        
+
+        session["source"] = source_type
+        session["transcript_raw"] = new_text
+        session["transcript_diarized"] = diarization["turns"]
+        session["speaker_count"] = diarization["speaker_count"]
+        # Keep legacy field for backwards compat
+        session["transcript"] = new_text
+        # Clear old analysis since transcript changed
+        session["analysis"] = None
+
         # Write back
         with open(path, "w", encoding="utf-8") as f:
             json.dump(session, f, ensure_ascii=False, indent=2)
-            
-        return {"status": "success", "session_id": session_id}
-        
+
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "source": source_type,
+            "speaker_count": diarization["speaker_count"]
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Failed to process Word document: {str(e)}")
+        raise HTTPException(500, detail=f"Failed to process document: {str(e)}")

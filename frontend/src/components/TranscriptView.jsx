@@ -1,7 +1,10 @@
 import React, { useState, useMemo } from 'react'
-import { ChevronDown, ChevronUp, MessageSquare } from 'lucide-react'
+import { ChevronDown, ChevronUp, MessageSquare, Users } from 'lucide-react'
 
-// Helper to parse transcript string into structured messages
+/**
+ * Parse a plain-text transcript string into structured messages.
+ * Used as a fallback when diarized turns are not available (legacy sessions).
+ */
 function parseTranscript(transcriptString) {
   if (!transcriptString) return []
 
@@ -10,7 +13,7 @@ function parseTranscript(transcriptString) {
   let currentSpeaker = null
   let currentText = []
 
-  // Match lines like "Patient: hello" or "מטפל: שלום"
+  // Match lines like "Speaker 1: hello" or "Patient: hello" or "מטפל: שלום"
   const speakerRegex = /^([a-zA-Zא-ת\s\d_-]+):\s*(.*)$/
 
   for (let i = 0; i < lines.length; i++) {
@@ -53,14 +56,41 @@ function parseTranscript(transcriptString) {
   return messages
 }
 
-export default function TranscriptView({ transcript, initiallyExpanded = true }) {
+/**
+ * Assigns a consistent color to each speaker based on their label.
+ */
+const SPEAKER_COLORS = [
+  { bg: 'rgba(107, 142, 35, 0.12)', border: 'rgba(107, 142, 35, 0.25)', label: '#8FBC5A' },  // sage-green
+  { bg: 'rgba(100, 149, 237, 0.12)', border: 'rgba(100, 149, 237, 0.25)', label: '#6495ED' },  // cornflower-blue
+  { bg: 'rgba(218, 165, 32, 0.12)', border: 'rgba(218, 165, 32, 0.25)', label: '#DAA520' },   // goldenrod
+  { bg: 'rgba(205, 92, 92, 0.12)', border: 'rgba(205, 92, 92, 0.25)', label: '#CD5C5C' },     // indian-red
+  { bg: 'rgba(147, 112, 219, 0.12)', border: 'rgba(147, 112, 219, 0.25)', label: '#9370DB' },  // medium-purple
+]
+
+function getSpeakerColor(speaker, speakerMap) {
+  if (!speakerMap.has(speaker)) {
+    speakerMap.set(speaker, speakerMap.size % SPEAKER_COLORS.length)
+  }
+  return SPEAKER_COLORS[speakerMap.get(speaker)]
+}
+
+
+export default function TranscriptView({ transcript, diarizedTurns, speakerCount, initiallyExpanded = true }) {
   const [expanded, setExpanded] = useState(initiallyExpanded)
 
-  const messages = useMemo(() => parseTranscript(transcript), [transcript])
+  // Use diarized turns if available, else fall back to parsing the string
+  const messages = useMemo(() => {
+    if (diarizedTurns && diarizedTurns.length > 0) {
+      return diarizedTurns
+    }
+    return parseTranscript(transcript)
+  }, [diarizedTurns, transcript])
 
-  if (!transcript) return null
+  // Build a stable speaker → color index map
+  const speakerMap = useMemo(() => new Map(), [messages])
 
-  // If we couldn't parse it well (maybe just one huge block), fallback to raw
+  if (!transcript && (!diarizedTurns || diarizedTurns.length === 0)) return null
+
   const isStructured = messages.length > 1 || (messages.length === 1 && messages[0].speaker !== 'Unknown')
 
   return (
@@ -72,6 +102,12 @@ export default function TranscriptView({ transcript, initiallyExpanded = true })
         <div className="flex items-center gap-3">
           <MessageSquare className="text-brand-accent" size={20} />
           <h3 className="text-lg font-serif">Session Transcript</h3>
+          {speakerCount && (
+            <span className="flex items-center gap-1 text-xs text-brand-sage/60 bg-black/20 px-2.5 py-1 rounded-full border border-brand-sage/10">
+              <Users size={12} />
+              {speakerCount} speaker{speakerCount !== 1 ? 's' : ''}
+            </span>
+          )}
         </div>
         {expanded ? <ChevronUp size={20} className="text-brand-sage" /> : <ChevronDown size={20} className="text-brand-sage" />}
       </button>
@@ -79,36 +115,34 @@ export default function TranscriptView({ transcript, initiallyExpanded = true })
       {expanded && (
         <div className="p-6 overflow-y-auto max-h-[600px] bg-black/10">
           {isStructured ? (
-            <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-3">
               {messages.map((msg, index) => {
-                const isTherapist = msg.speaker.toLowerCase().includes('therapist') || msg.speaker.includes('מטפל') || msg.speaker.includes('מראיין')
-                const isPatient = msg.speaker.toLowerCase().includes('patient') || msg.speaker.includes('מטופל') || msg.speaker.includes('מרואיין')
-                
-                // Determine styling based on speaker role
-                let bubbleClass = "max-w-[85%] rounded-2xl p-4 shadow-sm"
-                let containerClass = "flex w-full"
-                
-                if (isTherapist) {
-                  // Therapist on the left styling
-                  containerClass += " justify-start"
-                  bubbleClass += " bg-brand-sage/10 border border-brand-sage/20 text-brand-cream/90 rounded-tl-sm"
-                } else if (isPatient) {
-                  // Patient on the right styling
-                  containerClass += " justify-end"
-                  bubbleClass += " bg-brand-accent/10 border border-brand-accent/20 text-brand-cream/90 rounded-tr-sm"
-                } else {
-                  // Default unknown or other speaker
-                  containerClass += " justify-start"
-                  bubbleClass += " bg-white/5 border border-white/10 text-brand-cream/80"
-                }
+                const color = getSpeakerColor(msg.speaker, speakerMap)
+                const isEven = (speakerMap.get(msg.speaker) % 2) === 0
 
                 return (
-                  <div key={index} className={containerClass}>
-                    <div className={bubbleClass}>
-                      <div className={`text-xs font-semibold mb-1 uppercase tracking-wide opacity-70 ${isPatient ? 'text-right' : 'text-left'}`}>
+                  <div key={index} className={`flex w-full ${isEven ? 'justify-start' : 'justify-end'}`}>
+                    <div
+                      className="max-w-[85%] rounded-2xl p-4 shadow-sm"
+                      style={{
+                        backgroundColor: color.bg,
+                        borderWidth: '1px',
+                        borderStyle: 'solid',
+                        borderColor: color.border,
+                        borderTopLeftRadius: isEven ? '4px' : undefined,
+                        borderTopRightRadius: !isEven ? '4px' : undefined,
+                      }}
+                    >
+                      <div
+                        className={`text-xs font-semibold mb-1.5 uppercase tracking-wide ${isEven ? 'text-left' : 'text-right'}`}
+                        style={{ color: color.label }}
+                      >
                         {msg.speaker}
                       </div>
-                      <div className={`whitespace-pre-wrap text-sm leading-relaxed ${isPatient ? 'text-right' : 'text-left'}`} dir="auto">
+                      <div
+                        className={`whitespace-pre-wrap text-sm leading-relaxed text-brand-cream/90 ${isEven ? 'text-left' : 'text-right'}`}
+                        dir="auto"
+                      >
                         {msg.text}
                       </div>
                     </div>

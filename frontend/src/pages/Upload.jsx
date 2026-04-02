@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { transcribeAudio, analyzeSession, checkTranscribeStatus } from '../api/client'
+import { transcribeAudio, uploadTranscript, analyzeSession, checkTranscribeStatus } from '../api/client'
 import AudioDropzone from '../components/AudioDropzone'
 import TranscriptView from '../components/TranscriptView'
-import { Loader2, ArrowRight } from 'lucide-react'
+import { Loader2, ArrowRight, Mic, FileText, Upload as UploadIcon } from 'lucide-react'
 
 export default function Upload() {
   const navigate = useNavigate()
   
+  const [activeTab, setActiveTab] = useState('audio')  // 'audio' | 'document'
   const [file, setFile] = useState(null)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -38,8 +39,6 @@ export default function Upload() {
           }
         } catch (err) {
           console.error(err)
-          // If the backend restarted, we might get a 404 for a missing job ID.
-          // Handle this explicitly by abandoning the polling so we don't spin forever.
           setError('Lost connection to the backend or the transcription job was interrupted. Please refresh and try again.')
           setIsTranscribing(false)
           setJobId(null)
@@ -50,7 +49,7 @@ export default function Upload() {
     return () => clearInterval(interval)
   }, [jobId, isTranscribing])
 
-  const handleUpload = async (selectedFile) => {
+  const handleAudioUpload = async (selectedFile) => {
     setFile(selectedFile)
     setError('')
     setIsTranscribing(true)
@@ -79,8 +78,34 @@ export default function Upload() {
     }
   }
 
+  const handleDocumentUpload = async (e) => {
+    const selectedFile = e.target.files?.[0]
+    if (!selectedFile) return
+
+    const fname = selectedFile.name.toLowerCase()
+    if (!fname.endsWith('.docx') && !fname.endsWith('.pdf')) {
+      setError('Only .docx and .pdf files are supported')
+      return
+    }
+
+    setFile(selectedFile)
+    setError('')
+    setIsTranscribing(true)
+    setSessionData(null)
+
+    try {
+      const response = await uploadTranscript(selectedFile)
+      setSessionData(response.data)
+      setIsTranscribing(false)
+    } catch (err) {
+      console.error(err)
+      setError(err.response?.data?.detail || err.message || 'Failed to process transcript')
+      setIsTranscribing(false)
+      setFile(null)
+    }
+  }
+
   const handleAnalyze = async () => {
-    // Look for session_id in multiple possible keys returned by the backend
     const sessionId = sessionData?.session_id || sessionData?.id
     if (!sessionId) return
 
@@ -96,11 +121,20 @@ export default function Upload() {
     }
   }
 
+  const handleReset = () => {
+    setFile(null)
+    setSessionData(null)
+    setError('')
+    setIsTranscribing(false)
+    setIsAnalyzing(false)
+    setJobId(null)
+  }
+
   return (
     <div className="max-w-4xl mx-auto py-8 animate-fade-in space-y-8">
       <header className="mb-4">
         <h1 className="text-4xl font-serif text-brand-cream mb-2">Upload Session</h1>
-        <p className="text-brand-sage/80">Process a raw audio file to generate a clinical transcript.</p>
+        <p className="text-brand-sage/80">Process audio or a transcript document to generate a clinical session record.</p>
       </header>
 
       {error && (
@@ -109,24 +143,84 @@ export default function Upload() {
         </div>
       )}
 
-      {/* Upload area */}
+      {/* Tab Switcher — only show when not processing */}
       {!sessionData && !isTranscribing && (
-        <AudioDropzone 
-          onFileSelected={handleUpload} 
-          onFileError={(msg) => setError(msg)}
-          isLoading={false} 
-        />
+        <>
+          <div className="flex border-b border-brand-sage/20">
+            <button
+              onClick={() => { setActiveTab('audio'); setError('') }}
+              className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === 'audio'
+                  ? 'border-brand-accent text-brand-accent'
+                  : 'border-transparent text-brand-sage/60 hover:text-brand-sage'
+              }`}
+            >
+              <Mic size={16} />
+              Audio File
+            </button>
+            <button
+              onClick={() => { setActiveTab('document'); setError('') }}
+              className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === 'document'
+                  ? 'border-brand-accent text-brand-accent'
+                  : 'border-transparent text-brand-sage/60 hover:text-brand-sage'
+              }`}
+            >
+              <FileText size={16} />
+              Document Upload
+            </button>
+          </div>
+
+          {/* Audio Upload Tab */}
+          {activeTab === 'audio' && (
+            <AudioDropzone 
+              onFileSelected={handleAudioUpload} 
+              onFileError={(msg) => setError(msg)}
+              isLoading={false} 
+            />
+          )}
+
+          {/* Document Upload Tab */}
+          {activeTab === 'document' && (
+            <div className="flex flex-col items-center justify-center py-16 bg-black/20 rounded-xl border-2 border-dashed border-[#2C3E50] hover:border-brand-sage/40 transition-colors px-8">
+              <div className="bg-brand-sage/10 rounded-full p-4 mb-6">
+                <FileText className="text-brand-sage" size={32} />
+              </div>
+              <h3 className="text-xl font-serif text-brand-cream mb-2">Upload Transcript Document</h3>
+              <p className="text-brand-sage/60 text-sm mb-6 text-center max-w-md">
+                Upload a <strong>.docx</strong> or <strong>.pdf</strong> file containing your session transcript.
+                Speakers will be automatically identified.
+              </p>
+              <label className="cursor-pointer inline-flex items-center gap-2 bg-brand-accent text-brand-navy px-6 py-3 rounded font-medium hover:bg-brand-accent/90 transition-colors">
+                <UploadIcon size={18} />
+                Choose File
+                <input
+                  type="file"
+                  accept=".docx,.pdf"
+                  className="hidden"
+                  onChange={handleDocumentUpload}
+                />
+              </label>
+            </div>
+          )}
+        </>
       )}
 
+      {/* Processing State */}
       {isTranscribing && (
         <div className="flex flex-col items-center justify-center py-16 bg-black/20 rounded-xl border border-[#2C3E50] px-8 text-center">
           <Loader2 className="animate-spin text-brand-accent mb-6" size={40} />
-          <h3 className="text-2xl font-serif text-brand-cream mb-2">Transcribing audio...</h3>
+          <h3 className="text-2xl font-serif text-brand-cream mb-2">
+            {activeTab === 'audio' ? 'Transcribing audio...' : 'Processing document...'}
+          </h3>
           <p className="text-brand-sage/70 text-sm mb-8">
-            Processing your audio file with Groq's Whisper API.
+            {activeTab === 'audio'
+              ? "Transcribing with Whisper, then identifying speakers."
+              : "Extracting text and identifying speakers."
+            }
           </p>
           
-          {/* Progress Bar Container */}
+          {/* Progress Bar */}
           <div className="w-full max-w-md bg-black/40 rounded-full h-3 mb-3 overflow-hidden border border-brand-sage/20">
             <div 
               className="bg-brand-accent h-3 rounded-full transition-all duration-500 ease-out animate-pulse"
@@ -134,15 +228,29 @@ export default function Upload() {
             ></div>
           </div>
           <p className="text-brand-sage/60 font-mono text-sm">
-            Analyzing audio...
+            Analyzing...
           </p>
         </div>
       )}
 
+      {/* Results */}
       {sessionData && (
         <div className="space-y-6 animate-fade-in-up">
           <div className="bg-brand-sage/10 text-brand-sage px-4 py-3 rounded border border-brand-sage/30 flex items-center justify-between">
-            <span>Successfully transcribed <strong>{file?.name}</strong></span>
+            <span>
+              Successfully processed <strong>{file?.name}</strong>
+              {sessionData.speaker_count && (
+                <span className="ml-2 text-xs opacity-70">
+                  · {sessionData.speaker_count} speaker{sessionData.speaker_count !== 1 ? 's' : ''} detected
+                </span>
+              )}
+            </span>
+            <button
+              onClick={handleReset}
+              className="text-xs text-brand-sage/60 hover:text-brand-sage underline"
+            >
+              Upload another
+            </button>
           </div>
           
           {/* Conversation Window */}
@@ -156,12 +264,10 @@ export default function Upload() {
               </div>
             </div>
             <div className="max-h-[600px] overflow-y-auto p-6 bg-black/20">
-              <TranscriptView 
-                transcript={
-                  sessionData?.transcript || 
-                  sessionData?.text || 
-                  (typeof sessionData === 'string' ? sessionData : '')
-                } 
+              <TranscriptView
+                transcript={sessionData?.transcript_raw || sessionData?.transcript || ''}
+                diarizedTurns={sessionData?.transcript_diarized}
+                speakerCount={sessionData?.speaker_count}
               />
             </div>
           </div>

@@ -8,6 +8,7 @@ langchain-community
 langchain-huggingface
 chromadb
 pymupdf
+python-docx
 sentence-transformers
 python-dotenv
 httpx

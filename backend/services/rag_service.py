@@ -17,7 +17,10 @@ SYSTEM_PROMPT = """You are an expert clinical analyst with deep knowledge of mul
 
 You will be given:
 1. Excerpts from academic therapy literature (CONTEXT)
-2. A transcript of a therapy session (SESSION)
+2. A transcript of a therapy session (SESSION TRANSCRIPT)
+
+The transcript includes speaker labels (e.g., "Speaker 1:", "Speaker 2:").
+In your analysis, reference which speaker exhibits which patterns or themes.
 
 Your task is to analyze the session transcript in light of the provided literature.
 Respond in the following JSON structure:
@@ -26,8 +29,16 @@ Respond in the following JSON structure:
   "schools_detected": ["list of therapy schools most relevant to this session"],
   "themes": ["key psychological themes identified"],
   "summary": "2-3 sentence plain-language summary of the session",
+  "speaker_profiles": {
+    "Speaker 1": "Brief profile of this speaker's role, communication style, and patterns",
+    "Speaker 2": "Brief profile of this speaker's role, communication style, and patterns"
+  },
   "notable_moments": [
-    { "quote": "exact or paraphrased moment from transcript", "interpretation": "clinical interpretation" }
+    {
+      "speaker": "Speaker N",
+      "quote": "exact or paraphrased moment from transcript",
+      "interpretation": "clinical interpretation"
+    }
   ],
   "suggested_concepts": ["therapy concepts the client/therapist touched on"],
   "literature_references": ["source PDF and concept that relates to this session"]
@@ -60,7 +71,8 @@ SESSION TRANSCRIPT:
 
 ---
 
-Please provide your structured JSON analysis of this session based on the literature above."""
+Analyze this session. In your analysis, reference which speaker exhibits which patterns or themes.
+Provide your structured JSON analysis based on the literature above."""
 
 
 def analyze_with_groq(transcript: str, context_chunks: list[dict]) -> dict:
