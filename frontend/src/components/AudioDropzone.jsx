@@ -22,7 +22,7 @@ export default function AudioDropzone({ onFileSelected, onFileError, isLoading }
       'video/mp4': ['.mp4', '.m4a'],
     },
     maxFiles: 1,
-    maxSize: 50 * 1024 * 1024, // 50 MB limit
+    maxSize: 100 * 1024 * 1024, // 100 MB limit
     disabled: isLoading,
   })
 
@@ -59,7 +59,7 @@ export default function AudioDropzone({ onFileSelected, onFileError, isLoading }
         <span className="bg-black/20 px-2 py-1 rounded">MP3</span>
         <span className="bg-black/20 px-2 py-1 rounded">WAV</span>
         <span className="bg-black/20 px-2 py-1 rounded">M4A</span>
-        <span className="bg-black/20 px-2 py-1 rounded">Max 50MB</span>
+        <span className="bg-black/20 px-2 py-1 rounded">Max 100MB</span>
       </div>
     </div>
   )

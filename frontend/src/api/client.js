@@ -29,6 +29,7 @@ export const analyzeSession = (session_id) =>
 
 export const getSessions = () => api.get("/sessions");
 export const getSession = (id) => api.get(`/sessions/${id}`);
+export const deleteSession = (id) => api.delete(`/sessions/${id}`);
 export const indexPdfs = () => api.post("/index");
 export const getIndexStatus = () => api.get("/index/status");
 

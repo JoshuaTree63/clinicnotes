@@ -13,7 +13,12 @@ app = FastAPI(title="Therapy Analyzer API", version="1.0.0")
 # Allow React frontend (localhost:5173) to call the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:5174", "http://127.0.0.1:5174",
+        "http://localhost:5175", "http://127.0.0.1:5175",
+        "http://localhost:5176", "http://127.0.0.1:5176",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )

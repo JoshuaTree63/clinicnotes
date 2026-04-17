@@ -12,17 +12,13 @@ def get_embeddings():
     return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
 
-def get_vectorstore():
-    """Load existing ChromaDB vectorstore from disk."""
-    return Chroma(
-        persist_directory=VECTORSTORE_DIR,
-        embedding_function=get_embeddings(),
-    )
-
-
 def get_or_create_vectorstore():
-    """Create or load the ChromaDB vectorstore."""
+    """Load or create the ChromaDB vectorstore from disk."""
     return Chroma(
         persist_directory=VECTORSTORE_DIR,
         embedding_function=get_embeddings(),
     )
+
+
+# Alias for callers that use the shorter name
+get_vectorstore = get_or_create_vectorstore

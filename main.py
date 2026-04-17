@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+import os
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-
+from backend.routers import transcribe, analyze, index
 from transcribe_hebrew import AppConfig
 
 
@@ -38,6 +39,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers for transcription, analysis, and RAG indexing
+app.include_router(transcribe.router, prefix="/api", tags=["transcription"])
+app.include_router(analyze.router, prefix="/api", tags=["analysis"])
+app.include_router(index.router, prefix="/api", tags=["indexing"])
 
 
 @app.get("/health")
@@ -99,4 +105,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-

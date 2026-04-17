@@ -2,7 +2,9 @@ import io
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, concurrency
+import docx
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from services.groq_service import diarize_transcript, format_transcript_for_llm
 from services.rag_service import (
@@ -40,7 +42,7 @@ async def analyze_session(request: AnalyzeRequest):
         raise HTTPException(400, detail="Session has no transcript to analyze")
 
     # Retrieve relevant PDF chunks
-    context_chunks = await concurrency.run_in_threadpool(retrieve_context, transcript)
+    context_chunks = await run_in_threadpool(retrieve_context, transcript)
     if not context_chunks:
         raise HTTPException(
             400, detail="No indexed documents found. Run /api/index first."
@@ -48,7 +50,7 @@ async def analyze_session(request: AnalyzeRequest):
 
     # Try Groq first, fall back to OpenRouter (running in threads)
     try:
-        analysis = await concurrency.run_in_threadpool(analyze_with_groq, transcript, context_chunks)
+        analysis = await run_in_threadpool(analyze_with_groq, transcript, context_chunks)
     except Exception:
         try:
             analysis = await analyze_with_openrouter(transcript, context_chunks)
@@ -97,7 +99,13 @@ def get_session(session_id: str):
         return json.load(f)
 
 
-import docx
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str):
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+    os.remove(path)
+    return {"status": "deleted", "session_id": session_id}
 
 
 @router.post("/sessions/{session_id}/transcript/override")
@@ -132,7 +140,7 @@ async def override_transcript(session_id: str, file: UploadFile = File(...)):
             raise HTTPException(400, detail="Could not extract text from the uploaded file")
 
         # Re-diarize the new transcript
-        diarization = await concurrency.run_in_threadpool(diarize_transcript, new_text)
+        diarization = await run_in_threadpool(diarize_transcript, new_text)
 
         # Load and update session JSON
         with open(path, "r", encoding="utf-8") as f:

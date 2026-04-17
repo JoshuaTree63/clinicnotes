@@ -1,7 +1,9 @@
 import os
 import json
+import re
 import subprocess
 import tempfile
+import time
 import shutil
 from groq import Groq
 
@@ -12,26 +14,28 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # ---------------------------------------------------------------------------
 # Diarization prompt — instructs the LLM to return structured speaker turns
 # ---------------------------------------------------------------------------
-DIARIZATION_SYSTEM_PROMPT = """
-You are a transcript analyst. You will receive a raw therapy session transcript.
-Your job is to identify and separate distinct speakers.
+DIARIZATION_SYSTEM_PROMPT = """You are diarizing a therapy session transcript. The recording is almost always between a therapist and a client (2 speakers total). Occasionally there may be 3 (e.g., couple's therapy).
 
-Rules:
-- Label speakers as "Speaker 1", "Speaker 2", etc. (never invent names or roles)
-- Speaker 1 is always the first person to speak
-- Split the transcript into speaker turns — a turn ends when a different speaker begins
-- Keep each turn's text exactly as it appears in the transcript (do not paraphrase)
-- If you cannot reliably distinguish speakers, group everything under "Speaker 1"
+HOW TO DISTINGUISH SPEAKERS (therapy-specific heuristics):
+- The THERAPIST typically: asks open-ended questions ("How did that make you feel?", "Tell me more about..."), reflects feelings ("It sounds like..."), offers interpretations, speaks in shorter turns, uses clinical/neutral language.
+- The CLIENT typically: shares personal experiences and emotions, speaks in longer monologues, uses first-person ("I felt...", "My mother..."), may digress, expresses distress or realization.
+- Speaker 1 = the first person who speaks in the transcript. Stay consistent: once you assign a person to Speaker 1, every utterance from that same person MUST be labeled Speaker 1 through the entire transcript.
 
-Respond ONLY with a valid JSON object in this exact format:
+CRITICAL RULES:
+- Preserve the transcript text EXACTLY as given — do not paraphrase, shorten, or reword anything.
+- A turn ends ONLY when a different speaker starts. Long monologues stay as ONE turn — never split a single speaker's words into fake alternating turns.
+- Default to exactly 2 speakers unless the content clearly indicates more people are present.
+- If a section is ambiguous, prefer continuing the current speaker rather than switching.
+- If PREVIOUS_CONTEXT is provided, the speaker labels there are FIXED — use them to determine who Speaker 1 and Speaker 2 are, and maintain that mapping in your output.
+
+Respond with ONLY valid JSON in this exact shape:
 {
   "speaker_count": 2,
   "turns": [
     { "speaker": "Speaker 1", "text": "..." },
     { "speaker": "Speaker 2", "text": "..." }
   ]
-}
-"""
+}"""
 
 
 # ---------------------------------------------------------------------------
@@ -55,19 +59,85 @@ def transcribe_audio(file_path: str) -> str:
     return _transcribe_large_file(file_path)
 
 
-def _send_to_whisper(file_path: str) -> str:
-    """Helper to send a single file to Whisper."""
+def _parse_retry_after_seconds(err_msg: str) -> float | None:
+    """Extract 'Please try again in 1m38s' or '98.5s' from a Groq rate-limit error."""
+    m = re.search(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", err_msg)
+    if not m:
+        return None
+    minutes = int(m.group(1)) if m.group(1) else 0
+    seconds = float(m.group(2))
+    return minutes * 60 + seconds
+
+
+def _send_to_whisper(file_path: str, max_retries: int = 2) -> str:
+    """Helper to send a single file to Whisper. Retries on rate-limit errors."""
+    # Pass the basename explicitly — if we pass the raw file object, the SDK
+    # uses its full path (e.g. "./data/temp/abc_recording.mp3") as the filename,
+    # and Groq sometimes fails to detect the format from that, returning
+    # "could not process file - is it a valid media file?".
+    filename = os.path.basename(file_path)
+
+    for attempt in range(max_retries + 1):
+        try:
+            with open(file_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=(filename, audio_file),
+                    response_format="text",
+                )
+            return str(transcription).strip() if transcription else ""
+        except Exception as e:
+            msg = str(e)
+            is_rate_limit = "rate_limit_exceeded" in msg or "429" in msg
+            wait = _parse_retry_after_seconds(msg) if is_rate_limit else None
+
+            if is_rate_limit and wait is not None and attempt < max_retries:
+                # Add a small cushion so we don't retry right on the boundary
+                wait_with_buffer = wait + 3
+                print(
+                    f"[Whisper] Rate limit hit for {filename}. "
+                    f"Waiting {wait_with_buffer:.0f}s then retrying "
+                    f"(attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(wait_with_buffer)
+                continue
+
+            print(f"Error in Whisper call for {file_path}: {e}")
+            raise e
+
+    # Should be unreachable, but keeps type checkers happy
+    raise RuntimeError("Whisper call exhausted retries without raising")
+
+
+def _is_valid_audio_chunk(chunk_path: str, min_bytes: int = 10_000) -> bool:
+    """Skip chunks that are too small or lack valid audio magic bytes.
+    ffmpeg -c copy can produce a tail chunk without valid MP3/container
+    frames, which Whisper rejects as 'could not process file'."""
     try:
-        with open(file_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="whisper-large-v3",
-                file=audio_file,
-                response_format="text"
-            )
-        return str(transcription).strip() if transcription else ""
-    except Exception as e:
-        print(f"Error in Whisper call for {file_path}: {e}")
-        raise e
+        size = os.path.getsize(chunk_path)
+    except OSError:
+        return False
+    if size < min_bytes:
+        return False
+    try:
+        with open(chunk_path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    # Same magic-byte check as in the router
+    if head.startswith(b"ID3") or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return True
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return True
+    if head[4:8] == b"ftyp":
+        return True
+    if head.startswith(b"fLaC"):
+        return True
+    if head.startswith(b"OggS"):
+        return True
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return True
+    return False
 
 
 def _transcribe_large_file(file_path: str) -> str:
@@ -77,19 +147,29 @@ def _transcribe_large_file(file_path: str) -> str:
         ext = os.path.splitext(file_path)[1]
         chunk_pattern = os.path.join(temp_dir, "chunk_%03d" + ext)
 
-        # Split into 10 minute segments (600 seconds)
+        # Split into 10-minute segments. -reset_timestamps makes each chunk
+        # self-contained; -c copy avoids re-encoding for speed/quality.
         split_cmd = [
             "ffmpeg", "-i", file_path,
             "-f", "segment", "-segment_time", "600",
-            "-c", "copy", chunk_pattern
+            "-reset_timestamps", "1",
+            "-c", "copy", chunk_pattern,
         ]
 
         subprocess.run(split_cmd, capture_output=True, check=True)
 
-        chunks = sorted([os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.startswith("chunk_")])
+        chunks = sorted(
+            os.path.join(temp_dir, f)
+            for f in os.listdir(temp_dir)
+            if f.startswith("chunk_")
+        )
 
         full_transcript = []
         for chunk in chunks:
+            if not _is_valid_audio_chunk(chunk):
+                size = os.path.getsize(chunk) if os.path.exists(chunk) else 0
+                print(f"[Whisper] Skipping invalid/tiny chunk {os.path.basename(chunk)} ({size} bytes)")
+                continue
             transcript = _send_to_whisper(chunk)
             if transcript:
                 full_transcript.append(transcript)
@@ -102,11 +182,40 @@ def _transcribe_large_file(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 # Diarization via LLM
 # ---------------------------------------------------------------------------
+def _diarize_chunk(chunk_text: str, context_turns: list[dict] | None = None) -> dict:
+    """Send one chunk to the LLM. Optional context_turns anchors speaker identity across chunks."""
+    user_parts = []
+    if context_turns:
+        user_parts.append("PREVIOUS_CONTEXT (already labeled — use these to maintain consistent Speaker 1/Speaker 2 identity. Do NOT repeat these turns in your output):")
+        for t in context_turns:
+            snippet = t["text"][:400]
+            user_parts.append(f'{t["speaker"]}: {snippet}')
+        user_parts.append("")
+        user_parts.append("NEW TRANSCRIPT TO DIARIZE (label every turn; preserve text verbatim):")
+    user_parts.append(chunk_text)
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": DIARIZATION_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(user_parts)},
+        ],
+        temperature=0.0,
+        max_tokens=8000,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+
 def diarize_transcript(raw_transcript: str) -> dict:
     """
-    Takes raw transcript text, returns diarized speaker turns via LLM.
-    Handles long transcripts by chunking into ~3000-word segments and
-    merging the resulting speaker turns.
+    Diarizes a raw transcript into speaker turns via LLM.
+
+    Strategy:
+      - For typical session lengths (<= ~12K words), run a SINGLE LLM call —
+        this gives the best speaker consistency.
+      - For longer transcripts, chunk at safe boundaries and carry the last
+        two labeled turns forward as context so Speaker 1/2 identity is stable.
 
     Returns:
         {
@@ -114,54 +223,54 @@ def diarize_transcript(raw_transcript: str) -> dict:
             "turns": [{"speaker": "Speaker 1", "text": "..."}, ...]
         }
     """
-    if not raw_transcript or len(raw_transcript.strip()) == 0:
+    if not raw_transcript or not raw_transcript.strip():
         return {
             "speaker_count": 1,
-            "turns": [{"speaker": "Speaker 1", "text": raw_transcript or ""}]
+            "turns": [{"speaker": "Speaker 1", "text": raw_transcript or ""}],
         }
 
-    # Split into chunks of ~3000 words to avoid hitting token limits
     words = raw_transcript.split()
-    chunk_size = 3000
-    transcript_chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-    all_turns = []
-    all_speakers = set()
+    # Single-call path: handles almost all real sessions (~128K context on llama-3.3-70b)
+    SINGLE_CALL_LIMIT = 12000
+    CHUNK_WORDS = 6000  # conservative so output fits in max_tokens=8000
 
-    for chunk in transcript_chunks:
+    if len(words) <= SINGLE_CALL_LIMIT:
         try:
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": DIARIZATION_SYSTEM_PROMPT},
-                    {"role": "user", "content": chunk}
-                ],
-                temperature=0.0,        # deterministic — consistent parsing
-                max_tokens=4000,
-                response_format={"type": "json_object"}
-            )
-
-            result = json.loads(response.choices[0].message.content)
-
-            # Validate expected keys exist
-            if "turns" not in result or "speaker_count" not in result:
-                # Fallback: wrap chunk as Speaker 1
-                all_turns.append({"speaker": "Speaker 1", "text": chunk})
-                all_speakers.add("Speaker 1")
-            else:
-                for turn in result["turns"]:
-                    all_turns.append(turn)
-                    all_speakers.add(turn.get("speaker", "Speaker 1"))
+            result = _diarize_chunk(raw_transcript)
+            turns = result.get("turns") or []
+            if turns:
+                speakers = {t.get("speaker", "Speaker 1") for t in turns}
+                return {"speaker_count": len(speakers), "turns": turns}
         except Exception as e:
-            print(f"Error diarizing transcript chunk: {e}")
-            # Safe fallback for this chunk
-            all_turns.append({"speaker": "Speaker 1", "text": chunk})
-            all_speakers.add("Speaker 1")
+            print(f"Diarization failed (single-call): {e}")
+        # Safe fallback — one speaker, original text intact
+        return {
+            "speaker_count": 1,
+            "turns": [{"speaker": "Speaker 1", "text": raw_transcript}],
+        }
 
-    return {
-        "speaker_count": len(all_speakers),
-        "turns": all_turns
-    }
+    # Multi-chunk path — pass last 2 turns as anchor to keep identity stable
+    chunks = [" ".join(words[i:i + CHUNK_WORDS]) for i in range(0, len(words), CHUNK_WORDS)]
+    all_turns: list[dict] = []
+
+    for i, chunk in enumerate(chunks):
+        context_turns = all_turns[-2:] if i > 0 and all_turns else None
+        try:
+            result = _diarize_chunk(chunk, context_turns=context_turns)
+            turns = result.get("turns") or []
+            if not turns:
+                raise ValueError("LLM returned no turns")
+            all_turns.extend(turns)
+        except Exception as e:
+            print(f"Diarization failed on chunk {i}: {e}")
+            # Don't collapse the whole chunk into Speaker 1 — that hides the
+            # rest of the session. Keep the last known speaker if we have one.
+            last_speaker = all_turns[-1]["speaker"] if all_turns else "Speaker 1"
+            all_turns.append({"speaker": last_speaker, "text": chunk})
+
+    speakers = {t.get("speaker", "Speaker 1") for t in all_turns}
+    return {"speaker_count": len(speakers), "turns": all_turns}
 
 
 # ---------------------------------------------------------------------------
