@@ -1,8 +1,10 @@
 import React, { useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSession, analyzeSession, overrideTranscript } from '../api/client'
+import { getSession, analyzeSession, overrideTranscript, renameSpeaker, mergeSpeaker, removeSpeaker, editTurn } from '../api/client'
 import TranscriptView from '../components/TranscriptView'
+import SpeakerStats from '../components/SpeakerStats'
+import AudioPlayer from '../components/AudioPlayer'
 import AnalysisCard from '../components/AnalysisCard'
 import { Loader2, ArrowRight, Calendar, ArrowLeft, Upload, Mic, FileText, Users } from 'lucide-react'
 
@@ -48,6 +50,54 @@ export default function SessionDetail() {
       return data
     }
   })
+
+  const applySpeakerUpdate = (data) => {
+    queryClient.setQueryData(['session', id], (prev) =>
+      prev
+        ? {
+            ...prev,
+            transcript_diarized: data.transcript_diarized,
+            ...(data.speaker_count !== undefined ? { speaker_count: data.speaker_count } : {}),
+          }
+        : prev
+    )
+  }
+
+  const handleRenameSpeaker = async (oldName, newName) => {
+    try {
+      const { data } = await renameSpeaker(id, oldName, newName)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setAnalyzeError(err.response?.data?.detail || err.message || 'Rename failed')
+    }
+  }
+
+  const handleMergeSpeaker = async (fromName, intoName) => {
+    try {
+      const { data } = await mergeSpeaker(id, fromName, intoName)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setAnalyzeError(err.response?.data?.detail || err.message || 'Merge failed')
+    }
+  }
+
+  const handleRemoveSpeaker = async (name) => {
+    try {
+      const { data } = await removeSpeaker(id, name)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setAnalyzeError(err.response?.data?.detail || err.message || 'Remove failed')
+    }
+  }
+
+  const handleEditTurn = async (turnIndex, text) => {
+    try {
+      const { data } = await editTurn(id, turnIndex, text)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setAnalyzeError(err.response?.data?.detail || err.message || 'Edit failed')
+    }
+  }
 
   // Mutation to trigger analysis
   const analyzeMutation = useMutation({
@@ -143,13 +193,31 @@ export default function SessionDetail() {
         </div>
       )}
 
+      {session.audio_filename && (
+        <AudioPlayer src={`http://localhost:8000/api/sessions/${session.id}/audio`} />
+      )}
+
       {/* Transcript — pass both legacy and diarized data */}
-      <TranscriptView
-        transcript={session.transcript_raw || session.transcript}
-        diarizedTurns={session.transcript_diarized}
-        speakerCount={session.speaker_count}
-        initiallyExpanded={!session.analysis}
-      />
+      <div className="flex flex-col lg:flex-row gap-4">
+        <div className="flex-1 min-w-0">
+          <TranscriptView
+            transcript={session.transcript_raw || session.transcript}
+            diarizedTurns={session.transcript_diarized}
+            speakerCount={session.speaker_count}
+            sessionId={session.id}
+            onRenameSpeaker={handleRenameSpeaker}
+            onEditTurn={handleEditTurn}
+            initiallyExpanded={!session.analysis}
+          />
+        </div>
+        <div className="lg:w-72 shrink-0">
+          <SpeakerStats
+            diarizedTurns={session.transcript_diarized}
+            onMergeSpeaker={handleMergeSpeaker}
+            onRemoveSpeaker={handleRemoveSpeaker}
+          />
+        </div>
+      </div>
 
       {/* Analysis Section */}
       {session.analysis ? (

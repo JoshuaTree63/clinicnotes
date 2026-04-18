@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.concurrency import run_in_threadpool
 import logging
-from services.groq_service import transcribe_audio, diarize_transcript
+from services.groq_service import transcribe_audio, transcribe_audio_with_segments, diarize_transcript
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -20,6 +20,9 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 TEMP_DIR = "./data/temp"  # Temporary storage for uploaded audio before transcription
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+AUDIO_DIR = os.getenv("AUDIO_DIR", "./data/audio")  # Persistent audio store for playback
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".mp4", ".webm", ".ogg", ".flac", ".mpga", ".mpeg"}
@@ -100,25 +103,60 @@ async def transcribe_session(file: UploadFile = File(...)):
 
         logger.info("Starting transcription...")
 
-        # Transcribe the audio
+        # Transcribe the audio with timestamped segments (for pyannote alignment)
         try:
-            logger.info("Executing Whisper transcription...")
-            raw_transcript = await run_in_threadpool(transcribe_audio, temp_file_path)
-
-            logger.info("Transcription completed. Diarizing speakers...")
-            diarization = await run_in_threadpool(diarize_transcript, raw_transcript)
-            logger.info(f"Diarization completed. {diarization['speaker_count']} speakers detected.")
+            logger.info("Executing Whisper transcription (verbose_json)...")
+            whisper_segments = await run_in_threadpool(transcribe_audio_with_segments, temp_file_path)
+            raw_transcript = " ".join(s["text"] for s in whisper_segments).strip()
         except Exception as groq_err:
             logger.error(f"Groq API Error: {groq_err}")
             raise HTTPException(status_code=500, detail=f"Transcription failed: {str(groq_err)}")
 
+        # Diarize: prefer acoustic (pyannote), fall back to LLM if it fails
+        diarization = None
+        try:
+            logger.info("Running pyannote acoustic diarization...")
+            from services.diarization_service import run_diarization, align_segments, build_turns
+            speaker_segments = await run_in_threadpool(run_diarization, temp_file_path)
+            aligned = align_segments(whisper_segments, speaker_segments)
+            diarization = build_turns(aligned)
+            logger.info(
+                f"Pyannote diarization complete: {diarization['speaker_count']} speakers, "
+                f"{len(diarization['turns'])} turns."
+            )
+        except Exception as pyannote_err:
+            logger.warning(f"Pyannote failed, falling back to LLM diarization: {pyannote_err}")
+            try:
+                diarization = await run_in_threadpool(diarize_transcript, raw_transcript)
+                logger.info(f"LLM diarization complete: {diarization['speaker_count']} speakers detected.")
+            except Exception as llm_err:
+                logger.error(f"LLM diarization also failed: {llm_err}")
+                # Last-resort: single speaker, unsplit transcript
+                diarization = {
+                    "speaker_count": 1,
+                    "turns": [{"speaker": "Speaker 1", "text": raw_transcript}],
+                }
+
         # Create session record with new schema
         session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        # Persist the audio for playback alongside the transcript.
+        audio_filename = f"{session_id}{ext}"
+        audio_persist_path = os.path.join(AUDIO_DIR, audio_filename)
+        try:
+            shutil.move(temp_file_path, audio_persist_path)
+            temp_file_path = None  # Skip the temp-cleanup branch in `finally`
+            logger.info(f"Audio persisted to {audio_persist_path}")
+        except Exception as move_err:
+            logger.warning(f"Could not persist audio (playback will be unavailable): {move_err}")
+            audio_filename = None
+
         session_data = {
             "id": session_id,
             "date": datetime.now().isoformat(),
             "source": "audio",
             "filename": file.filename,
+            "audio_filename": audio_filename,
             "transcript_raw": raw_transcript,
             "transcript_diarized": diarization["turns"],
             "speaker_count": diarization["speaker_count"],
@@ -138,7 +176,8 @@ async def transcribe_session(file: UploadFile = File(...)):
             "session_id": session_id,
             "source": "audio",
             "speaker_count": diarization["speaker_count"],
-            "transcript_diarized": diarization["turns"]
+            "transcript_diarized": diarization["turns"],
+            "audio_filename": audio_filename,
         }
     except HTTPException:
         raise
@@ -146,8 +185,8 @@ async def transcribe_session(file: UploadFile = File(...)):
         logger.error(f"Unexpected error during transcription process: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
     finally:
-        # Clean up temp file
-        if os.path.exists(temp_file_path):
+        # Clean up temp file (skipped if we already moved it to AUDIO_DIR)
+        if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 

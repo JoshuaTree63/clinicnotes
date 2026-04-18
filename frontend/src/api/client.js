@@ -33,6 +33,24 @@ export const deleteSession = (id) => api.delete(`/sessions/${id}`);
 export const indexPdfs = () => api.post("/index");
 export const getIndexStatus = () => api.get("/index/status");
 
+export const renameSpeaker = (sessionId, oldName, newName) =>
+  api.post(`/sessions/${sessionId}/speakers/rename`, {
+    old_name: oldName,
+    new_name: newName,
+  })
+
+export const mergeSpeaker = (sessionId, fromName, intoName) =>
+  api.post(`/sessions/${sessionId}/speakers/merge`, {
+    from_name: fromName,
+    into_name: intoName,
+  })
+
+export const removeSpeaker = (sessionId, name) =>
+  api.post(`/sessions/${sessionId}/speakers/remove`, { name })
+
+export const editTurn = (sessionId, turnIndex, text) =>
+  api.post(`/sessions/${sessionId}/turns/${turnIndex}`, { text })
+
 export const overrideTranscript = (sessionId, file) => {
   const formData = new FormData()
   formData.append('file', file)

@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { transcribeAudio, uploadTranscript, analyzeSession, checkTranscribeStatus } from '../api/client'
+import { transcribeAudio, uploadTranscript, analyzeSession, checkTranscribeStatus, renameSpeaker, mergeSpeaker, removeSpeaker, editTurn } from '../api/client'
 import AudioDropzone from '../components/AudioDropzone'
 import TranscriptView from '../components/TranscriptView'
+import SpeakerStats from '../components/SpeakerStats'
+import AudioPlayer from '../components/AudioPlayer'
 import { Loader2, ArrowRight, Mic, FileText, Upload as UploadIcon } from 'lucide-react'
 
 export default function Upload() {
@@ -102,6 +104,61 @@ export default function Upload() {
       setError(err.response?.data?.detail || err.message || 'Failed to process transcript')
       setIsTranscribing(false)
       setFile(null)
+    }
+  }
+
+  const applySpeakerUpdate = (data) =>
+    setSessionData((prev) =>
+      prev
+        ? {
+            ...prev,
+            transcript_diarized: data.transcript_diarized,
+            ...(data.speaker_count !== undefined ? { speaker_count: data.speaker_count } : {}),
+          }
+        : prev
+    )
+
+  const handleRenameSpeaker = async (oldName, newName) => {
+    const sessionId = sessionData?.session_id || sessionData?.id
+    if (!sessionId) return
+    try {
+      const { data } = await renameSpeaker(sessionId, oldName, newName)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Rename failed')
+    }
+  }
+
+  const handleMergeSpeaker = async (fromName, intoName) => {
+    const sessionId = sessionData?.session_id || sessionData?.id
+    if (!sessionId) return
+    try {
+      const { data } = await mergeSpeaker(sessionId, fromName, intoName)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Merge failed')
+    }
+  }
+
+  const handleRemoveSpeaker = async (name) => {
+    const sessionId = sessionData?.session_id || sessionData?.id
+    if (!sessionId) return
+    try {
+      const { data } = await removeSpeaker(sessionId, name)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Remove failed')
+    }
+  }
+
+  const handleEditTurn = async (turnIndex, text) => {
+    const sessionId = sessionData?.session_id || sessionData?.id
+    if (!sessionId) return
+    try {
+      const { data } = await editTurn(sessionId, turnIndex, text)
+      applySpeakerUpdate(data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Edit failed')
     }
   }
 
@@ -253,21 +310,28 @@ export default function Upload() {
             </button>
           </div>
           
-          {/* Conversation Window */}
-          <div className="bg-[#0A0F1D] border border-[#2C3E50] rounded-xl overflow-hidden shadow-2xl">
-            <div className="px-5 py-3 border-b border-[#2C3E50] bg-white/5 flex items-center justify-between">
-              <h3 className="text-xs font-bold text-brand-sage uppercase tracking-widest">Session Transcript</h3>
-              <div className="flex gap-1.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
-              </div>
-            </div>
-            <div className="max-h-[600px] overflow-y-auto p-6 bg-black/20">
+          {sessionData.audio_filename && (sessionData.session_id || sessionData.id) && (
+            <AudioPlayer
+              src={`http://localhost:8000/api/sessions/${sessionData.session_id || sessionData.id}/audio`}
+            />
+          )}
+
+          <div className="flex flex-col lg:flex-row gap-4">
+            <div className="flex-1 min-w-0">
               <TranscriptView
                 transcript={sessionData?.transcript_raw || sessionData?.transcript || ''}
                 diarizedTurns={sessionData?.transcript_diarized}
                 speakerCount={sessionData?.speaker_count}
+                sessionId={sessionData?.session_id || sessionData?.id}
+                onRenameSpeaker={handleRenameSpeaker}
+                onEditTurn={handleEditTurn}
+              />
+            </div>
+            <div className="lg:w-72 shrink-0">
+              <SpeakerStats
+                diarizedTurns={sessionData?.transcript_diarized}
+                onMergeSpeaker={handleMergeSpeaker}
+                onRemoveSpeaker={handleRemoveSpeaker}
               />
             </div>
           </div>

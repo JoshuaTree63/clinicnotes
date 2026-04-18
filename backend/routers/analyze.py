@@ -5,6 +5,7 @@ import os
 import docx
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 from services.groq_service import diarize_transcript, format_transcript_for_llm
 from services.rag_service import (
@@ -15,10 +16,73 @@ from services.rag_service import (
 
 router = APIRouter()
 SESSIONS_DIR = os.getenv("SESSIONS_DIR", "./data/sessions")
+AUDIO_DIR = os.getenv("AUDIO_DIR", "./data/audio")
+
+_AUDIO_MIME = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".mpga": "audio/mpeg",
+    ".mpeg": "audio/mpeg",
+}
 
 
 class AnalyzeRequest(BaseModel):
     session_id: str
+
+
+class RenameSpeakerRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+
+class MergeSpeakerRequest(BaseModel):
+    from_name: str
+    into_name: str
+
+
+class RemoveSpeakerRequest(BaseModel):
+    name: str
+
+
+class EditTurnRequest(BaseModel):
+    text: str
+
+
+def _collapse_adjacent_turns(turns: list[dict]) -> list[dict]:
+    """Merge consecutive turns with the same speaker into one, preserving start/end timing."""
+    out: list[dict] = []
+    for t in turns:
+        speaker = t.get("speaker")
+        text = (t.get("text") or "").strip()
+        if not text:
+            continue
+        start = t.get("start")
+        end = t.get("end")
+        if out and out[-1].get("speaker") == speaker:
+            out[-1]["text"] = (out[-1]["text"] + " " + text).strip()
+            if end is not None:
+                out[-1]["end"] = end
+        else:
+            merged = {"speaker": speaker, "text": text}
+            if start is not None:
+                merged["start"] = start
+            if end is not None:
+                merged["end"] = end
+            out.append(merged)
+    return out
+
+
+def _save_turns(session: dict, turns: list[dict], path: str) -> dict:
+    session["transcript_diarized"] = turns
+    session["speaker_count"] = len({t.get("speaker") for t in turns})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(session, f, ensure_ascii=False, indent=2)
+    return session
 
 
 @router.post("/analyze")
@@ -99,11 +163,195 @@ def get_session(session_id: str):
         return json.load(f)
 
 
+@router.get("/sessions/{session_id}/audio")
+def stream_session_audio(session_id: str):
+    """Stream the persisted audio file for this session (supports Range requests for seeking)."""
+    session_path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(session_path):
+        raise HTTPException(404, detail="Session not found")
+    with open(session_path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    audio_filename = session.get("audio_filename")
+    if not audio_filename:
+        raise HTTPException(404, detail="No audio stored for this session")
+
+    audio_path = os.path.join(AUDIO_DIR, audio_filename)
+    if not os.path.exists(audio_path):
+        raise HTTPException(404, detail="Audio file missing on disk")
+
+    ext = os.path.splitext(audio_filename)[1].lower()
+    media_type = _AUDIO_MIME.get(ext, "application/octet-stream")
+    return FileResponse(audio_path, media_type=media_type, filename=audio_filename)
+
+
+@router.get("/sessions/{session_id}/transcript.docx")
+def download_transcript_docx(session_id: str):
+    """Build a .docx from the session's diarized transcript and stream it."""
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+    with open(path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    doc = docx.Document()
+    doc.add_heading("Session Transcript", level=1)
+    meta = doc.add_paragraph()
+    meta.add_run(f"Session ID: {session.get('id', session_id)}\n").italic = True
+    if session.get("date"):
+        meta.add_run(f"Date: {session['date']}\n").italic = True
+    if session.get("speaker_count"):
+        meta.add_run(f"Speakers: {session['speaker_count']}").italic = True
+
+    turns = session.get("transcript_diarized") or []
+    if turns:
+        for turn in turns:
+            p = doc.add_paragraph()
+            p.add_run(f"{turn.get('speaker', 'Unknown')}: ").bold = True
+            p.add_run(turn.get("text", ""))
+    else:
+        doc.add_paragraph(session.get("transcript_raw") or session.get("transcript") or "")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    filename = f"{session_id}_transcript.docx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/sessions/{session_id}/speakers/merge")
+def merge_speaker(session_id: str, req: MergeSpeakerRequest):
+    """Relabel every `from_name` turn as `into_name` and collapse adjacent same-speaker turns."""
+    if req.from_name == req.into_name:
+        raise HTTPException(400, detail="from_name and into_name are identical")
+
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+    with open(path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    turns = session.get("transcript_diarized") or []
+    found = any(t.get("speaker") == req.from_name for t in turns)
+    if not found:
+        raise HTTPException(404, detail=f"No turns found for speaker '{req.from_name}'")
+
+    for t in turns:
+        if t.get("speaker") == req.from_name:
+            t["speaker"] = req.into_name
+
+    turns = _collapse_adjacent_turns(turns)
+    session = _save_turns(session, turns, path)
+    return {
+        "status": "ok",
+        "transcript_diarized": session["transcript_diarized"],
+        "speaker_count": session["speaker_count"],
+    }
+
+
+@router.post("/sessions/{session_id}/speakers/remove")
+def remove_speaker(session_id: str, req: RemoveSpeakerRequest):
+    """Delete every turn belonging to `name`, then collapse adjacent same-speaker turns."""
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+    with open(path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    turns = session.get("transcript_diarized") or []
+    remaining = [t for t in turns if t.get("speaker") != req.name]
+    if len(remaining) == len(turns):
+        raise HTTPException(404, detail=f"No turns found for speaker '{req.name}'")
+
+    remaining = _collapse_adjacent_turns(remaining)
+    session = _save_turns(session, remaining, path)
+    return {
+        "status": "ok",
+        "transcript_diarized": session["transcript_diarized"],
+        "speaker_count": session["speaker_count"],
+    }
+
+
+@router.post("/sessions/{session_id}/turns/{turn_index}")
+def edit_turn(session_id: str, turn_index: int, req: EditTurnRequest):
+    """Replace the text of a single turn by index. Keeps speaker and ordering intact."""
+    new_text = (req.text or "").strip()
+    if not new_text:
+        raise HTTPException(400, detail="text must not be empty")
+
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+    with open(path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    turns = session.get("transcript_diarized") or []
+    if turn_index < 0 or turn_index >= len(turns):
+        raise HTTPException(404, detail=f"Turn index {turn_index} out of range")
+
+    turns[turn_index]["text"] = new_text
+    session["transcript_diarized"] = turns
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(session, f, ensure_ascii=False, indent=2)
+
+    return {"status": "ok", "transcript_diarized": turns}
+
+
+@router.post("/sessions/{session_id}/speakers/rename")
+def rename_speaker(session_id: str, req: RenameSpeakerRequest):
+    """Rename a speaker label across every turn of the session."""
+    new_name = (req.new_name or "").strip()
+    if not new_name:
+        raise HTTPException(400, detail="new_name must not be empty")
+    if new_name == req.old_name:
+        raise HTTPException(400, detail="new_name is identical to old_name")
+
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, detail="Session not found")
+
+    with open(path, "r", encoding="utf-8") as f:
+        session = json.load(f)
+
+    turns = session.get("transcript_diarized") or []
+    changed = 0
+    for turn in turns:
+        if turn.get("speaker") == req.old_name:
+            turn["speaker"] = new_name
+            changed += 1
+    if changed == 0:
+        raise HTTPException(404, detail=f"No turns found for speaker '{req.old_name}'")
+
+    session = _save_turns(session, turns, path)
+    return {
+        "status": "ok",
+        "renamed_turns": changed,
+        "transcript_diarized": session["transcript_diarized"],
+        "speaker_count": session["speaker_count"],
+    }
+
+
 @router.delete("/sessions/{session_id}")
 def delete_session(session_id: str):
     path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, detail="Session not found")
+    # Remove the persisted audio first so we don't leave orphans if the session delete fails.
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            session = json.load(f)
+        audio_filename = session.get("audio_filename")
+        if audio_filename:
+            audio_path = os.path.join(AUDIO_DIR, audio_filename)
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+    except Exception:
+        pass
     os.remove(path)
     return {"status": "deleted", "session_id": session_id}
 

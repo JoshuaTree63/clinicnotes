@@ -140,6 +140,90 @@ def _is_valid_audio_chunk(chunk_path: str, min_bytes: int = 10_000) -> bool:
     return False
 
 
+def _extract_segments(response, offset: float = 0.0) -> list[dict]:
+    """Normalize Groq verbose_json segments into [{start, end, text}]."""
+    raw = getattr(response, "segments", None) or []
+    out = []
+    for s in raw:
+        start = s["start"] if isinstance(s, dict) else getattr(s, "start", None)
+        end = s["end"] if isinstance(s, dict) else getattr(s, "end", None)
+        text = s["text"] if isinstance(s, dict) else getattr(s, "text", None)
+        if start is None or end is None or text is None:
+            continue
+        out.append({"start": float(start) + offset, "end": float(end) + offset, "text": str(text).strip()})
+    return out
+
+
+def _send_to_whisper_verbose(file_path: str, offset: float = 0.0, max_retries: int = 2) -> list[dict]:
+    """Send a single file to Whisper and return timestamped segments."""
+    filename = os.path.basename(file_path)
+    for attempt in range(max_retries + 1):
+        try:
+            with open(file_path, "rb") as audio_file:
+                response = client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=(filename, audio_file),
+                    response_format="verbose_json",
+                )
+            return _extract_segments(response, offset=offset)
+        except Exception as e:
+            msg = str(e)
+            is_rate_limit = "rate_limit_exceeded" in msg or "429" in msg
+            wait = _parse_retry_after_seconds(msg) if is_rate_limit else None
+            if is_rate_limit and wait is not None and attempt < max_retries:
+                wait_with_buffer = wait + 3
+                print(f"[Whisper:verbose] Rate limit. Waiting {wait_with_buffer:.0f}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait_with_buffer)
+                continue
+            print(f"Error in Whisper verbose call for {file_path}: {e}")
+            raise e
+    raise RuntimeError("Whisper verbose call exhausted retries")
+
+
+def transcribe_audio_with_segments(file_path: str) -> list[dict]:
+    """
+    Transcribes audio and returns timestamped segments:
+        [{"start": float, "end": float, "text": str}, ...]
+
+    Timestamps are in seconds, relative to the ORIGINAL file (chunk offsets
+    are already applied), so they can be aligned with pyannote speaker spans.
+    """
+    MAX_SIZE_BYTES = 20 * 1024 * 1024
+    file_size = os.path.getsize(file_path)
+    if file_size <= MAX_SIZE_BYTES:
+        return _send_to_whisper_verbose(file_path, offset=0.0)
+
+    # Large-file path: split with ffmpeg, transcribe each chunk, offset timestamps
+    CHUNK_SECONDS = 600
+    temp_dir = tempfile.mkdtemp()
+    try:
+        ext = os.path.splitext(file_path)[1]
+        chunk_pattern = os.path.join(temp_dir, "chunk_%03d" + ext)
+        split_cmd = [
+            "ffmpeg", "-i", file_path,
+            "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
+            "-reset_timestamps", "1",
+            "-c", "copy", chunk_pattern,
+        ]
+        subprocess.run(split_cmd, capture_output=True, check=True)
+        chunks = sorted(
+            os.path.join(temp_dir, f)
+            for f in os.listdir(temp_dir)
+            if f.startswith("chunk_")
+        )
+        all_segments: list[dict] = []
+        for idx, chunk in enumerate(chunks):
+            if not _is_valid_audio_chunk(chunk):
+                size = os.path.getsize(chunk) if os.path.exists(chunk) else 0
+                print(f"[Whisper:verbose] Skipping invalid chunk {os.path.basename(chunk)} ({size} bytes)")
+                continue
+            offset = idx * CHUNK_SECONDS
+            all_segments.extend(_send_to_whisper_verbose(chunk, offset=offset))
+        return all_segments
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 def _transcribe_large_file(file_path: str) -> str:
     """Splits a large file into chunks and transcribes them."""
     temp_dir = tempfile.mkdtemp()
